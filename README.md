@@ -1,6 +1,7 @@
 # Cloudflare DDNS proxy
 Cloudflare worker to proxy DDNS updates to their API.
-Create worker
+
+Create worker and add the js to enable. Works with Unifi (or anything that is using ddclient).
 
 ## Config
     service: choose any
