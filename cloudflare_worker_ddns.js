@@ -54,12 +54,12 @@ class Cloudflare {
 		return body.result[0];
 	}
 
-	async updateRecord(record, value) {
+	async updateRecord(zone, record, value) {
 		record.content = value;
 		const response = await this._fetchWithToken(
-			`zones/${record.zone_id}/dns_records/${record.id}`,
+			`zones/${zone.id}/dns_records/${record.id}`,
 			{
-				method: "PUT",
+				method: "PATCH",
 				body: JSON.stringify(record),
 			}
 		);
@@ -156,7 +156,7 @@ async function informAPI(url, name, token) {
 	const zone = await cloudflare.findZone(name);
 	for (const hostname of hostnames) {
 		const record = await cloudflare.findRecord(zone, hostname);
-		await cloudflare.updateRecord(record, ip);
+		await cloudflare.updateRecord(zone, record, ip);
 	}
 
 	if (url.searchParams.get("dnsto")) {
