@@ -169,7 +169,6 @@ async function handleRequest(request, env) {
 				const data = await request.json();
 				const acl = data.acl;
 				const token = data.token;
-				console.log(data);
 				if (acl && token)
 				{
 					const response = await encrypt_token_response(acl, token, env);
@@ -227,7 +226,7 @@ async function verify_decrypt_token(acl, hostnames, token, env) {
 
 async function encrypt_token_response(acl, token, env) {
 	const [keyBase64, filter] = await get_acl_config(acl, env);
-	const encrypted_token = encrypt(keyBase64, token);
+	const encrypted_token = await encrypt(keyBase64, token);
 	return new Response(JSON.stringify({"encrypted_token":encrypted_token}), {
 		status: 200,
 		headers: {
