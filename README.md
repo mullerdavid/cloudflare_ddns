@@ -12,6 +12,10 @@ The ACLs can be added as environment variables with `ACL_` prefix (for example A
 
 The config is looked up based on the ACL key (see protocol details) and the token is decrypted from the supplied base64 one if the records are matching the regex filter. This way neither the worker nor the client can update the records alone, and the middleware is enforcing the filters.
 
+```bash
+dd if=/dev/urandom bs=16 count=1 2>/dev/null | base64
+```
+
 # API documentation
 
 ## DDNS protocol
@@ -118,13 +122,13 @@ JSON
 ```
 
 # Unifi (ddclient) Config
-Works with Unifi (or anything that is using ddclient).
+Works with Unifi (or anything that is using ddclient). See DDNS protocol endpoint for details.
 
 ```
 service: choose any
-hostname: the name of the record(s) you want to update separated by coma (e.g. `subdomain.mydomain.org` or `subdomain.mydomain.org,*.subdomain.mydomain.org`)
-username: the name of the zone where the record is defined. (e.g. `mydomain.org`), optionally with a
-password: a Cloudflare api token with dns:edit and zone:read permissions
+hostname: hostname from DDNS protocol
+username: username from DDNS protocol
+password: password from DDNS protocol
 server: the Cloudflare Worker DNS plus the path `<worker-name>.<worker-subdomain>.workers.dev/update?hostname=%h&ip=%i`
 ```
   
