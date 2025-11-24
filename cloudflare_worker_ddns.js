@@ -1,24 +1,24 @@
-/*
-Config
-
-service: choose any
-hostname: the name of the record(s) you want to update separated by coma (e.g. "subdomain.mydomain.org" or "subdomain.mydomain.org,\*.subdomain.mydomain.org")
-username: the name of the zone where the record is defined. (e.g. "mydomain.org")
-password: a Cloudflare api token with dns:edit and zone:read permissions
-server: the Cloudflare Worker DNS plus the path "<worker-name>.<worker-subdomain>.workers.dev/update?hostname=%h&ip=%i"
-
-Notes for devices oldare than UDM
-
-service: choose from any of the following:  "dyndns", "noip", "zoneedit"
-server: the Cloudflare Worker DNS "<worker-name>.<worker-subdomain>.workers.dev"
-
-*/
-
 class BadRequestException extends Error {
 	constructor(reason) {
 		super(reason);
 		this.status = 400;
 		this.statusText = "Bad Request";
+	}
+}
+
+class AccessDeniedException extends Error {
+	constructor(reason) {
+		super(reason);
+		this.status = 403;
+		this.statusText = "Access Denied";
+	}
+}
+
+class InternalException extends Error {
+	constructor(reason) {
+		super(reason);
+		this.status = 500;
+		this.statusText = "Internal Server Error";
 	}
 }
 
@@ -81,6 +81,41 @@ class Cloudflare {
 	}
 }
 
+async function decrypt(keyBase64, ciphertextBase64) {
+	const FIXED_IV = new Uint8Array([0x7e, 0xed, 0xba, 0xe4, 0xfa, 0xa8, 0x41, 0x73, 0xfa, 0xde, 0xc0, 0x5c, 0xee, 0xa6, 0x9d, 0xff]);
+	const cryptoKey = await crypto.subtle.importKey(
+		"raw",
+		Uint8Array.from(atob(keyBase64), c => c.charCodeAt(0)),
+		{ name: "AES-CBC" },
+		false,
+		["decrypt"]
+	);
+	const decrypted = await crypto.subtle.decrypt(
+		{ name: "AES-CBC", iv: FIXED_IV },
+		cryptoKey,
+		Uint8Array.from(atob(ciphertextBase64), c => c.charCodeAt(0))
+	);
+	return new TextDecoder().decode(decrypted);
+}
+
+async function encrypt(keyBase64, plaintext) {
+	const FIXED_IV = new Uint8Array([0x7e, 0xed, 0xba, 0xe4, 0xfa, 0xa8, 0x41, 0x73, 0xfa, 0xde, 0xc0, 0x5c, 0xee, 0xa6, 0x9d, 0xff]);
+	const cryptoKey = await crypto.subtle.importKey(
+		"raw",
+		Uint8Array.from(atob(keyBase64), c => c.charCodeAt(0)),
+		{ name: "AES-CBC" },
+		false,
+		["encrypt"]
+	);
+	const encodedPlaintext = new TextEncoder().encode(plaintext);
+	const ciphertext = await crypto.subtle.encrypt(
+		{ name: "AES-CBC", iv: FIXED_IV },
+		cryptoKey,
+		encodedPlaintext
+	);
+	return btoa(String.fromCharCode(...new Uint8Array(ciphertext)));
+}
+
 function requireHttps(request) {
 	const { protocol } = new URL(request.url);
 	const forwardedProtocol = request.headers.get("x-forwarded-proto");
@@ -106,7 +141,7 @@ function parseBasicAuth(request) {
 	};
 }
 
-async function handleRequest(request) {
+async function handleRequest(request, env) {
 	requireHttps(request);
 	const { pathname } = new URL(request.url);
 
@@ -114,20 +149,39 @@ async function handleRequest(request) {
 		return new Response(null, { status: 204 });
 	}
 
-	if (pathname !== "/nic/update" && pathname !== "/update" && pathname !== "/auth/dynamic.html") {
-		return new Response("Not Found.", { status: 404 });
+	if (pathname === "/nic/update" || pathname === "/update" || pathname === "/auth/dynamic.html") {
+		if (!request.headers.has("Authorization")) {
+			throw new BadRequestException("Please provide valid credentials.");
+		}
+
+		const { username, password } = parseBasicAuth(request);
+		const url = new URL(request.url);
+		verifyParameters(url);
+
+		const response = await informAPI(url, username, password, env);
+		return response;
 	}
 
-	if (!request.headers.has("Authorization")) {
-		throw new BadRequestException("Please provide valid credentials.");
+	if (pathname === "/encrypt") {
+		if (request.method === "POST") {
+			const contentType = request.headers.get("content-type") || "";
+			if (contentType.includes("application/json")) {
+				const data = await request.json();
+				const acl = data.acl;
+				const token = data.token;
+				console.log(data);
+				if (acl && token)
+				{
+					const response = await encrypt_token_response(acl, token, env);
+					return response;
+				}
+			}
+		}
+		throw new BadRequestException('Requires POST with application/json {"acl":"acl", "token":"cloudflare-token"}');
 	}
+	
+	return new Response("Not Found.", { status: 404 });
 
-	const { username, password } = parseBasicAuth(request);
-	const url = new URL(request.url);
-	verifyParameters(url);
-
-	const response = await informAPI(url, username, password);
-	return response;
 }
 
 function verifyParameters(url) {
@@ -146,17 +200,58 @@ function verifyParameters(url) {
 	}
 }
 
-async function informAPI(url, name, token) {
+async function get_acl_config(acl, env) {
+	const acl_obj = env[`ACL_${acl}`];
+	if (!acl_obj) {
+		throw new InternalException(`ACL '${acl}' missing from configuration.`);
+	}
+	const { key: keyBase64, filter } = acl_obj;
+	if (!keyBase64 || !filter) {
+		throw new InternalException(`ACL '${acl}' missing key or filter.`);
+	}
+	return [keyBase64, filter];
+}
+  
+
+
+async function verify_decrypt_token(acl, hostnames, token, env) {
+	const [keyBase64, filter] = await get_acl_config(acl, env);
+	const filterRegex = new RegExp(filter);
+	for (const hostname of hostnames) {
+		if (!filterRegex.test(hostname)) {
+			throw new AccessDeniedException(`Filter not matching for hostname '${hostname}' with ACL '${acl}'`);
+		}
+	}
+	return await decrypt(keyBase64, token);
+}
+
+async function encrypt_token_response(acl, token, env) {
+	const [keyBase64, filter] = await get_acl_config(acl, env);
+	const encrypted_token = encrypt(keyBase64, token);
+	return new Response(JSON.stringify({"encrypted_token":encrypted_token}), {
+		status: 200,
+		headers: {
+			"Content-Type": "text/json;charset=UTF-8",
+			"Cache-Control": "no-store",
+		},
+	});
+}
+
+async function informAPI(url, zone_acl, token, env) {
 	const hostname_str = url.searchParams.get("hostname") || url.searchParams.get("host");
 	const hostnames = hostname_str.split(",");
+	const [zone, acl] = zone_acl.split(",");
 	const ip = url.searchParams.get("ip") || url.searchParams.get("myip") || url.searchParams.get("dnsto");
+	if (acl) {
+		token = await verify_decrypt_token(acl, hostnames, token, env);
+	}
 
 	const cloudflare = new Cloudflare({ token });
 
-	const zone = await cloudflare.findZone(name);
+	const zone_cf = await cloudflare.findZone(zone);
 	for (const hostname of hostnames) {
-		const record = await cloudflare.findRecord(zone, hostname);
-		await cloudflare.updateRecord(zone, record, ip);
+		const record = await cloudflare.findRecord(zone_cf, hostname);
+		await cloudflare.updateRecord(zone_cf, record, ip);
 	}
 
 	if (url.searchParams.get("dnsto")) {
@@ -181,7 +276,7 @@ async function informAPI(url, name, token) {
 
 export default {
 	async fetch(request, env, ctx) {
-		return handleRequest(request).catch((err) => {
+		return handleRequest(request, env).catch((err) => {
 			console.error(err.constructor.name, err);
 			const message = err.reason || err.stack || "Unknown Error";
 
