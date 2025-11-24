@@ -45,22 +45,47 @@ class Cloudflare {
 		return body.result[0];
 	}
 
-	async findRecord(zone, name) {
-		const response = await this._fetchWithToken(`zones/${zone.id}/dns_records?name=${name}`);
-		const body = await response.json();
-		if (!body.success || body.result.length === 0) {
-			throw new CloudflareApiException(`Failed to find dns record '${name}'`);
+	async findRecordInternal(zone, name, type, content) {
+		let params = new URLSearchParams({"name": name});
+		if (content) {
+			params.set("content", content);
 		}
-		return body.result[0];
+		params.set("type", type);
+		const response = await this._fetchWithToken(`zones/${zone.id}/dns_records?${params.toString()}`);
+		const body = await response.json();
+		if (body.success && body.result.length !== 0) {
+			return body.result[0];
+		}
 	}
 
-	async updateRecord(zone, record, value) {
-		record.content = value;
+	async findRecordNoThrow(zone, name, type = "A", content = null) {
+		if (type=="A" || type =="CNAME") {
+			const result1 = await this.findRecordInternal(zone, name, "A", null);
+			if (result1) {
+				return result1;
+			} 
+			const result2 = await this.findRecordInternal(zone, name, "CNAME", null);
+			return result2;
+		} else {
+			const result = await this.findRecordInternal(zone, name, type, content);
+			return result;
+		}
+	}
+
+	async findRecord(zone, name, type = "A", content = null) {
+		const result = await this.findRecordNoThrow(zone, name, type, content);
+		if (! result) {
+			throw new CloudflareApiException(`Failed to find dns record '${name}'`);
+		}
+		return result;
+	}
+
+	async updateRecord(zone, record_id, record_patch) {
 		const response = await this._fetchWithToken(
-			`zones/${zone.id}/dns_records/${record.id}`,
+			`zones/${zone.id}/dns_records/${record_id}`,
 			{
 				method: "PATCH",
-				body: JSON.stringify(record),
+				body: JSON.stringify(record_patch),
 			}
 		);
 		const body = await response.json();
@@ -68,6 +93,51 @@ class Cloudflare {
 			throw new CloudflareApiException("Failed to update dns record");
 		}
 		return body.result[0];
+	}
+
+	async createRecord(zone, record) {
+		const response = await this._fetchWithToken(
+			`zones/${zone.id}/dns_records`,
+			{
+				method: "POST",
+				body: JSON.stringify(record),
+			}
+		);
+		const body = await response.json();
+		if (!body.success) {
+			throw new CloudflareApiException("Failed to create dns record");
+		}
+		return body.result[0];
+	}
+
+	async deleteRecord(zone, record_id) {
+		const response = await this._fetchWithToken(
+			`zones/${zone.id}/dns_records/${record_id}`,
+			{
+				method: "DELETE",
+			}
+		);
+		const body = await response.json();
+		if (!body.success) {
+			throw new CloudflareApiException("Failed to create dns record");
+		}
+		return body.result[0];
+	}
+
+	async createOrUpdateRecord(zone, record) {
+		const result = await this.findRecordNoThrow(zone, record.name, record.type, record.content);
+		if (! result) {
+			await this.createRecord(zone, record);
+		} else {
+			await this.updateRecord(zone, result.id, record);
+		}
+	}
+
+	async deleteRecordIfExists(zone, record) {
+		const result = await this.findRecordNoThrow(zone, record.name, record.type, record.content);
+		if (result) {
+			await this.deleteRecord(zone, result.id);
+		}
 	}
 
 	async _fetchWithToken(endpoint, options = {}) {
@@ -156,10 +226,23 @@ async function handleRequest(request, env) {
 
 		const { username, password } = parseBasicAuth(request);
 		const url = new URL(request.url);
-		verifyParameters(url);
+		verifyParameters_ddns(url);
 
 		const response = await informAPI(url, username, password, env);
 		return response;
+	}
+
+	if (pathname === "/webhook") {
+		if (request.method === "POST") {
+			const contentType = request.headers.get("content-type") || "";
+			if (contentType.includes("application/json")) {
+				const data = await request.json();
+				verifyParameters_webhook(data);
+				const response = await webhook(data, env);
+				return response;
+			}
+		}
+		verifyParameters_webhook(null);
 	}
 
 	if (pathname === "/encrypt") {
@@ -183,7 +266,7 @@ async function handleRequest(request, env) {
 
 }
 
-function verifyParameters(url) {
+function verifyParameters_ddns(url) {
 	const { searchParams } = url;
 
 	if (!searchParams) {
@@ -199,6 +282,31 @@ function verifyParameters(url) {
 	}
 }
 
+function verifyParameters_webhook(data) {
+	const usage = 'Requires POST with application/json {"action":"set|unset", "record": {"name": "name", "type": "A|TXT|CNAME", "content": "ip|dns|txt"}, "zone": "zone", "acl": "optional_acl", "token": "token"}';
+	if (!data) {
+		throw new BadRequestException(usage);
+	}
+	const requiredKeys = ["action", "record", "zone", "token"];
+	for (const key of requiredKeys) {
+		if (!(key in data)) {
+			throw new BadRequestException(usage);
+		}
+	}
+	if (data.action != "set" && data.action != "unset") {
+		throw new BadRequestException(usage);
+	}
+	if (typeof data.record !== 'object') {
+		throw new BadRequestException(usage);
+	}
+	if (! data.record.name) {
+		throw new BadRequestException(usage);
+	}
+	if (data.record.type != "A" && data.record.type != "TXT" && data.record.type != "CNAME") {
+		throw new BadRequestException(usage);
+	}
+}
+
 async function get_acl_config(acl, env) {
 	const acl_obj = env[`ACL_${acl}`];
 	if (!acl_obj) {
@@ -210,8 +318,6 @@ async function get_acl_config(acl, env) {
 	}
 	return [keyBase64, filter];
 }
-  
-
 
 async function verify_decrypt_token(acl, hostnames, token, env) {
 	const [keyBase64, filter] = await get_acl_config(acl, env);
@@ -236,6 +342,44 @@ async function encrypt_token_response(acl, token, env) {
 	});
 }
 
+async function webhook(data, env) {
+	const action = data.action;
+	const zone = data.zone;
+	const record = data.record;
+	const record_name = record.name;
+	let record_content = record.content || "";
+	const record_type = record.type;
+	let token = data.token;
+	const acl = data.acl;
+	if (acl) {
+		token = await verify_decrypt_token(acl, [record_name], token, env);
+	}
+
+	if (record_type == "TXT") {
+		if (!record_content.startsWith('"') || !record_content.endsWith('"')) {
+			record_content = `"${record_content}"`;
+		}
+	}
+
+	const cloudflare = new Cloudflare({ token });
+	const zone_cf = await cloudflare.findZone(zone);
+	const record_filtered = {"name":record_name, "type": record_type, "content": record_content};
+
+	if (action == "unset") {
+		await cloudflare.deleteRecordIfExists(zone_cf, record_filtered);
+	} else {
+		await cloudflare.createOrUpdateRecord(zone_cf, record_filtered);
+	}
+
+	return new Response(`Done`, {
+		status: 200,
+		headers: {
+			"Content-Type": "text/plain;charset=UTF-8",
+			"Cache-Control": "no-store",
+		},
+	});
+}
+
 async function informAPI(url, zone_acl, token, env) {
 	const hostname_str = url.searchParams.get("hostname") || url.searchParams.get("host");
 	const hostnames = hostname_str.split(",");
@@ -250,7 +394,7 @@ async function informAPI(url, zone_acl, token, env) {
 	const zone_cf = await cloudflare.findZone(zone);
 	for (const hostname of hostnames) {
 		const record = await cloudflare.findRecord(zone_cf, hostname);
-		await cloudflare.updateRecord(zone_cf, record, ip);
+		await cloudflare.updateRecord(zone_cf, record.id, {"content": ip, "type": "A"});
 	}
 
 	if (url.searchParams.get("dnsto")) {
