@@ -381,9 +381,10 @@ async function webhook(data, env) {
 }
 
 async function informAPI(url, zone_acl, token, env) {
+	const split = /[,|]/
 	const hostname_str = url.searchParams.get("hostname") || url.searchParams.get("host");
-	const hostnames = hostname_str.split(",");
-	const [zone, acl] = zone_acl.split(",");
+	const hostnames = hostname_str.split(split);
+	const [zone, acl] = zone_acl.split(split);
 	const ip = url.searchParams.get("ip") || url.searchParams.get("myip") || url.searchParams.get("dnsto");
 	if (acl) {
 		token = await verify_decrypt_token(acl, hostnames, token, env);

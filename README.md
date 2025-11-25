@@ -28,11 +28,11 @@ The endpoint is available under the following paths:
 - `/auth/dynamic.html`
 
 Query parameters:
-- `host` or `hostname` to specify the domain(s) to update, for multiple domains, just separate them with `,` coma
+- `host` or `hostname` to specify the domain(s) to update, for multiple domains, just separate them with `,` or `|`
 - `ip` or `myip` or `dnsto` to specify the ip 
 
 The credentials are passed as part of the basic authentication:
-- `username` part should contain the Cloudflare zone name, with an optional ACL name separated with `,` coma
+- `username` part should contain the Cloudflare zone name, with an optional ACL name separated with  `,` or `|`
 - `password` part should contain the Cloudflare API token, or the encrypted variant if ACL was specified
 
 ### Examples
@@ -126,8 +126,8 @@ Works with Unifi (or anything that is using ddclient). See DDNS protocol endpoin
 
 ```
 service: choose any
-hostname: hostname from DDNS protocol
-username: username from DDNS protocol
+hostname: hostname(s) from DDNS protocol (use | separator)
+username: username from DDNS protocol (use | separator)
 password: password from DDNS protocol
 server: the Cloudflare Worker DNS plus the path `<worker-name>.<worker-subdomain>.workers.dev/update?hostname=%h&ip=%i`
 ```
@@ -136,6 +136,17 @@ server: the Cloudflare Worker DNS plus the path `<worker-name>.<worker-subdomain
 ```
 service: choose from any of the following:  "dyndns", "noip", "zoneedit"
 server: the Cloudflare Worker DNS "<worker-name>.<worker-subdomain>.workers.dev"
+```
+
+## Debug
+
+To check the config on the device via ssh.
+
+```bash
+sudo cat /etc/ddclient/ddclient_pppoe0.conf
+show dns dynamic status
+update dns dynamic interface pppoe0
+show log tail
 ```
 
 # Original work
